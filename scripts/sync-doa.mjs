@@ -48,26 +48,47 @@ function headerRowIndex(rows) {
 }
 
 async function downloadWorkbook() {
-  const downloadUrl = new URL(sharedLink);
-  downloadUrl.searchParams.set('download', '1');
-  const response = await fetch(downloadUrl, {
-    redirect: 'follow',
-    headers: {
-      accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel;q=0.9,*/*;q=0.5',
-      'user-agent': 'Inventory-Lens-DOA-Sync/1.0',
-    },
-  });
+  const sourceUrl = new URL(sharedLink);
+  const candidates = [];
 
-  if (!response.ok) {
-    throw new Error(`OneDrive respondió ${response.status}. Revisa que el enlace permita acceso anónimo y descarga.`);
+  const normalDownload = new URL(sourceUrl);
+  normalDownload.searchParams.set('download', '1');
+  candidates.push(normalDownload);
+
+  const cleanDownload = new URL(sourceUrl);
+  cleanDownload.search = '?download=1';
+  if (cleanDownload.href !== normalDownload.href) candidates.push(cleanDownload);
+
+  const shortLink = sourceUrl.pathname.match(/^\/:x:\/g(\/personal\/[^/]+)\/([^/]+)$/i);
+  if (shortLink) {
+    const directDownload = new URL(`${sourceUrl.origin}${shortLink[1]}/_layouts/15/download.aspx`);
+    directDownload.searchParams.set('share', shortLink[2]);
+    candidates.push(directDownload);
   }
 
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  const isZip = bytes[0] === 0x50 && bytes[1] === 0x4b;
-  if (!isZip) {
-    throw new Error('OneDrive devolvió una página web en lugar del XLSX. El vínculo puede requerir inicio de sesión o bloquear la descarga.');
+  const headers = {
+    accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel;q=0.9,application/octet-stream;q=0.8,*/*;q=0.5',
+    'accept-language': 'es-PA,es;q=0.9,en;q=0.8',
+    'cache-control': 'no-cache',
+    pragma: 'no-cache',
+    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+  };
+
+  const failures = [];
+  for (const [index, candidate] of candidates.entries()) {
+    const response = await fetch(candidate, { redirect: 'follow', headers });
+    if (!response.ok) {
+      failures.push(`ruta ${index + 1}: HTTP ${response.status}`);
+      continue;
+    }
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const isZip = bytes[0] === 0x50 && bytes[1] === 0x4b;
+    if (isZip) return bytes;
+    failures.push(`ruta ${index + 1}: respuesta no XLSX`);
   }
-  return bytes;
+
+  throw new Error(`SharePoint no permitió descargar el XLSX (${failures.join('; ')}). Confirma que el vínculo sea “Cualquier persona con el vínculo” y que la descarga no esté bloqueada.`);
 }
 
 function extractRecords(workbookBytes) {
