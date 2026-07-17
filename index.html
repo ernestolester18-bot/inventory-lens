@@ -156,6 +156,7 @@
     .layout { display: grid; grid-template-columns: 280px minmax(0,1fr); gap: 18px; align-items: start; }
     .filters { position: sticky; top: 92px; border-radius: var(--radius-lg); padding: 18px; }
     .section-title { font-size: .77rem; color: var(--muted); font-weight: 760; text-transform: uppercase; letter-spacing: .08em; }
+    .filter-helper { margin: 6px 0 16px; color: var(--faint); font-size: .75rem; line-height: 1.45; }
     .field { display: grid; gap: 7px; margin-top: 15px; }
     .field label { color: var(--muted); font-size: .76rem; font-weight: 680; }
     .control {
@@ -299,6 +300,7 @@
     <div class="layout">
       <aside class="filters glass" aria-label="Filtros de inventario">
         <div class="section-title">Filtros</div>
+        <p class="filter-helper">Las opciones se ajustan según tus selecciones.</p>
         <div class="field"><label for="locationFilter">Locación</label><select id="locationFilter" class="control"><option value="all">Todas las locaciones</option></select></div>
         <div class="field"><label for="departmentFilter">Departamento</label><select id="departmentFilter" class="control"><option value="all">Todos</option></select></div>
         <div class="field"><label for="classFilter">Clase</label><select id="classFilter" class="control"><option value="all">Todas</option></select></div>
@@ -340,7 +342,7 @@
 
   <div id="mobileScrim" class="mobile-scrim"></div>
   <aside id="mobileSheet" class="mobile-sheet" aria-label="Filtros móviles" aria-hidden="true">
-    <div class="sheet-grabber"></div><div class="sheet-scroll"><div class="section-title">Filtrar resultados</div><div id="mobileFilters"></div><div class="sheet-actions"><button id="resetMobileBtn" class="button button-quiet" type="button">Limpiar filtros</button><button id="applyMobileFilters" class="button button-primary" type="button">Ver resultados</button></div></div>
+    <div class="sheet-grabber"></div><div class="sheet-scroll"><div class="section-title">Filtrar resultados</div><p class="filter-helper">Cada opción muestra solo combinaciones disponibles.</p><div id="mobileFilters"></div><div class="sheet-actions"><button id="resetMobileBtn" class="button button-quiet" type="button">Limpiar filtros</button><button id="applyMobileFilters" class="button button-primary" type="button">Ver resultados</button></div></div>
   </aside>
 
   <dialog id="productDialog" aria-labelledby="dialogTitle">
@@ -507,23 +509,63 @@
       const title=els.dropZone.querySelector('.upload-title'); title.textContent=busy?'Procesando archivo…':'Carga o reemplaza tu inventario';
     }
 
-    function unique(field) { return [...new Set(state.products.map(p=>p[field]).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'es',{sensitivity:'base'})); }
+    const facetDefinitions = () => [
+      {field:'department',label:'Departamento',select:els.departmentFilter,allLabel:'Todos'},
+      {field:'className',label:'Clase',select:els.classFilter,allLabel:'Todas'},
+      {field:'sub1',label:'Subclase 1',select:els.subclass1Filter,allLabel:'Todas'},
+      {field:'sub2',label:'Subclase 2',select:els.subclass2Filter,allLabel:'Todas'},
+      {field:'brand',label:'Marca',select:els.brandFilter,allLabel:'Todas'},
+    ];
+    const availabilityDefinitions = [
+      {value:'stock',label:'Con stock',matches:product=>stockFor(product)>0},
+      {value:'doa',label:'Con equipos DOA',matches:product=>doaFor(product)>0},
+      {value:'low',label:'Stock bajo · 1–3',matches:product=>{const stock=stockFor(product);return stock>0&&stock<=3;}},
+      {value:'none',label:'Sin stock',matches:product=>stockFor(product)<=0},
+    ];
     function fillSelect(select,values,allLabel) { select.innerHTML=`<option value="all">${esc(allLabel)}</option>`+values.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join(''); }
+    function fillFacetSelect(select,entries,allLabel,total) {
+      const previous=select.value||'all'; const valid=previous==='all'||entries.some(entry=>entry.value===previous);
+      select.innerHTML=`<option value="all">${esc(allLabel)} (${number.format(total)})</option>`+entries.map(entry=>`<option value="${esc(entry.value)}">${esc(entry.label)} (${number.format(entry.count)})</option>`).join('');
+      select.value=valid?previous:'all'; return valid?null:previous;
+    }
+    function categoryMatches(product,limit=facetDefinitions().length) {
+      return facetDefinitions().slice(0,limit).every(({field,select})=>select.value==='all'||product[field]===select.value);
+    }
+    function searchMatches(product) { const query=norm(els.searchInput.value); return !query||product.search.includes(query); }
+    function availabilityMatches(product,value=els.availabilityFilter.value) {
+      if(value==='all')return true; const definition=availabilityDefinitions.find(item=>item.value===value); return definition?definition.matches(product):true;
+    }
+    function refreshCascadingFilters({syncMobile=true}={}) {
+      const facets=facetDefinitions(); const resets=[];
+      facets.forEach((facet,index)=>{
+        const scoped=state.products.filter(product=>categoryMatches(product,index)); const counts=new Map();
+        scoped.forEach(product=>{const value=product[facet.field];if(value)counts.set(value,(counts.get(value)||0)+1);});
+        const entries=[...counts].map(([value,count])=>({value,label:value,count})).sort((a,b)=>a.label.localeCompare(b.label,'es',{sensitivity:'base'}));
+        if(fillFacetSelect(facet.select,entries,facet.allLabel,scoped.length))resets.push(facet.label);
+      });
+      const availabilityScope=state.products.filter(product=>categoryMatches(product)&&searchMatches(product));
+      const availabilityEntries=availabilityDefinitions.map(item=>({...item,count:availabilityScope.filter(item.matches).length})).filter(item=>item.count>0);
+      if(fillFacetSelect(els.availabilityFilter,availabilityEntries,'Cualquier estado',availabilityScope.length))resets.push('Disponibilidad');
+      if(syncMobile)buildMobileFilters(); return resets;
+    }
     function populateFilters() {
-      fillSelect(els.locationFilter,state.locations.map(l=>l),'Todas las locaciones'); fillSelect(els.departmentFilter,unique('department'),'Todos'); fillSelect(els.classFilter,unique('className'),'Todas'); fillSelect(els.subclass1Filter,unique('sub1'),'Todas'); fillSelect(els.subclass2Filter,unique('sub2'),'Todas'); fillSelect(els.brandFilter,unique('brand'),'Todas');
-      buildMobileFilters();
+      fillSelect(els.locationFilter,state.locations.map(l=>l),'Todas las locaciones'); facetDefinitions().forEach(({select})=>select.value='all'); els.availabilityFilter.value='all'; refreshCascadingFilters();
     }
 
+    function handleFilterChange(announce=true) {
+      state.page=1; const resets=refreshCascadingFilters(); applyFilters();
+      if(announce&&resets.length)toast(`Se limpiaron filtros incompatibles: ${resets.join(', ')}`,'warn');
+    }
     function buildMobileFilters() {
-      const fields=[['mLocation','Locación',els.locationFilter],['mDepartment','Departamento',els.departmentFilter],['mClass','Clase',els.classFilter],['mSubclass1','Subclase 1',els.subclass1Filter],['mSubclass2','Subclase 2',els.subclass2Filter],['mBrand','Marca',els.brandFilter],['mAvailability','Disponibilidad',els.availabilityFilter]];
-      $('mobileFilters').innerHTML=fields.map(([id,label,source])=>`<div class="field"><label for="${id}">${label}</label><select id="${id}" class="control">${source.innerHTML}</select></div>`).join('');
-      fields.forEach(([id,,source])=>{ const mobile=$(id); mobile.value=source.value; mobile.addEventListener('change',()=>{source.value=mobile.value;applyFilters();}); });
+      const fields=[['mLocation','Locación',els.locationFilter],['mDepartment','Departamento',els.departmentFilter],['mClass','Clase',els.classFilter],['mSubclass1','Subclase 1',els.subclass1Filter],['mSubclass2','Subclase 2',els.subclass2Filter],['mBrand','Marca',els.brandFilter],['mAvailability','Disponibilidad',els.availabilityFilter]]; const container=$('mobileFilters');
+      if(!container.dataset.ready){
+        container.innerHTML=fields.map(([id,label])=>`<div class="field"><label for="${id}">${label}</label><select id="${id}" class="control"></select></div>`).join(''); container.dataset.ready='true';
+        fields.forEach(([id,,source])=>$(id).addEventListener('change',event=>{source.value=event.currentTarget.value;handleFilterChange();}));
+      }
+      fields.forEach(([id,,source])=>{const mobile=$(id);mobile.innerHTML=source.innerHTML;mobile.value=source.value;});
     }
 
-    function filterState(product) {
-      const stock=stockFor(product), doa=doaFor(product), status=statusFor(stock), q=norm(els.searchInput.value);
-      return (!q||product.search.includes(q)) && (els.departmentFilter.value==='all'||product.department===els.departmentFilter.value) && (els.classFilter.value==='all'||product.className===els.classFilter.value) && (els.subclass1Filter.value==='all'||product.sub1===els.subclass1Filter.value) && (els.subclass2Filter.value==='all'||product.sub2===els.subclass2Filter.value) && (els.brandFilter.value==='all'||product.brand===els.brandFilter.value) && (els.availabilityFilter.value==='all'||els.availabilityFilter.value===status||(els.availabilityFilter.value==='stock'&&stock>0)||(els.availabilityFilter.value==='doa'&&doa>0));
-    }
+    function filterState(product) { return searchMatches(product)&&categoryMatches(product)&&availabilityMatches(product); }
 
     function applyFilters() {
       state.filtered=state.products.filter(filterState); const sort=els.sortFilter.value;
@@ -559,7 +601,7 @@
       els.productDialog.showModal();
     }
 
-    function resetFilters() { els.searchInput.value=''; [els.locationFilter,els.departmentFilter,els.classFilter,els.subclass1Filter,els.subclass2Filter,els.brandFilter,els.availabilityFilter].forEach(s=>s.value='all'); els.sortFilter.value='stock-desc'; state.page=1; buildMobileFilters(); applyFilters(); toast('Filtros restablecidos'); }
+    function resetFilters() { els.searchInput.value=''; [els.locationFilter,els.departmentFilter,els.classFilter,els.subclass1Filter,els.subclass2Filter,els.brandFilter,els.availabilityFilter].forEach(s=>s.value='all'); els.sortFilter.value='stock-desc'; state.page=1; refreshCascadingFilters(); applyFilters(); toast('Filtros restablecidos'); }
     function openMobileFilters(open) { els.mobileSheet.classList.toggle('open',open); els.mobileScrim.classList.toggle('open',open); els.mobileSheet.setAttribute('aria-hidden',String(!open)); }
 
     function exportCSV() {
@@ -602,7 +644,7 @@
     function wireEvents() {
       els.fileInput.addEventListener('change',e=>handleFile(e.target.files[0]));
       ['dragenter','dragover'].forEach(type=>els.dropZone.addEventListener(type,e=>{e.preventDefault();els.dropZone.classList.add('dragover');})); ['dragleave','drop'].forEach(type=>els.dropZone.addEventListener(type,e=>{e.preventDefault();els.dropZone.classList.remove('dragover');})); els.dropZone.addEventListener('drop',e=>handleFile(e.dataTransfer.files[0])); els.dropZone.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();els.fileInput.click();}});
-      els.searchInput.addEventListener('input',defer(()=>{state.page=1;applyFilters();},80)); [els.locationFilter,els.departmentFilter,els.classFilter,els.subclass1Filter,els.subclass2Filter,els.brandFilter,els.availabilityFilter,els.sortFilter].forEach(el=>el.addEventListener('change',()=>{state.page=1;applyFilters();buildMobileFilters();}));
+      els.searchInput.addEventListener('input',defer(()=>handleFilterChange(false),80)); [els.locationFilter,els.departmentFilter,els.classFilter,els.subclass1Filter,els.subclass2Filter,els.brandFilter,els.availabilityFilter].forEach(el=>el.addEventListener('change',()=>handleFilterChange())); els.sortFilter.addEventListener('change',()=>{state.page=1;applyFilters();});
       $('resetBtn').addEventListener('click',resetFilters); els.prevBtn.addEventListener('click',()=>{if(state.page>1){state.page--;renderCards();$('resultsHeading').scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});}}); els.nextBtn.addEventListener('click',()=>{const max=Math.ceil(state.filtered.length/state.pageSize);if(state.page<max){state.page++;renderCards();$('resultsHeading').scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});}});
       $('exportBtn').addEventListener('click',exportCSV); $('closeDialog').addEventListener('click',()=>els.productDialog.close()); els.productDialog.addEventListener('click',e=>{if(e.target===els.productDialog)els.productDialog.close();});
       els.themeBtn.addEventListener('click',()=>applyTheme(document.documentElement.classList.contains('dark')?'light':'dark'));
